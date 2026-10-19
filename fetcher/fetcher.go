@@ -506,10 +506,15 @@ func getMailboxByAttr(c *imapclient.Client, attr imap.MailboxAttr) (string, erro
 }
 
 func buildDeliveryHeaderSection() *imap.FetchItemBodySection {
+	// Fetch the full message header instead of a HEADER.FIELDS subset.
+	// go-imap always encodes HEADER.FIELDS header names as quoted strings
+	// (e.g. "References"); some servers — notably Alibaba/AliYun enterprise IMAP —
+	// reject that form with "BAD invalid command or parameters". BODY.PEEK[HEADER]
+	// is accepted everywhere, and the consumers below parse the specific headers
+	// they need (References, Delivered-To, X-Forwarded-To, X-Original-To) from it.
 	return &imap.FetchItemBodySection{
-		Specifier:    imap.PartSpecifierHeader,
-		HeaderFields: []string{"Delivered-To", "X-Forwarded-To", "X-Original-To", "References"},
-		Peek:         true,
+		Specifier: imap.PartSpecifierHeader,
+		Peek:      true,
 	}
 }
 
@@ -1823,11 +1828,7 @@ func FetchArchiveEmails(account *config.Account, limit, offset uint32) ([]Email,
 	seqset.AddRange(from, to)
 
 	// Delivery header section for matching auto-forwarded emails
-	deliveryHeaderSection := &imap.FetchItemBodySection{
-		Specifier:    imap.PartSpecifierHeader,
-		HeaderFields: []string{"Delivered-To", "X-Forwarded-To", "X-Original-To", "References"},
-		Peek:         true,
-	}
+	deliveryHeaderSection := buildDeliveryHeaderSection()
 
 	fetchCmd := c.Fetch(seqset, &imap.FetchOptions{
 		Envelope:    true,
