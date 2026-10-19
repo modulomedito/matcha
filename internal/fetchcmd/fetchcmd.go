@@ -196,6 +196,7 @@ func FetchFolderEmailsCmd(cfg *config.Config, folderName string) tea.Cmd {
 				defer wg.Done()
 				emails, err := fetcher.FetchFolderEmails(&acc, folderName, InitialEmailLimit, 0)
 				if err != nil {
+					log.Printf("Error fetching folder %q from %s: %v", folderName, acc.Email, err)
 					return
 				}
 				mu.Lock()
