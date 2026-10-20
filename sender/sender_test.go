@@ -1,10 +1,16 @@
 package sender
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"mime"
+	"net/mail"
 	"strings"
 	"testing"
+
+	"github.com/floatpane/matcha/config"
+	"github.com/floatpane/matcha/internal/mailheader"
 )
 
 type failingReader struct{}
@@ -128,6 +134,64 @@ func TestGenerateMessageID(t *testing.T) {
 	randomPart := strings.TrimSuffix(unwrappedID, expectedSuffix)
 	if randomPart == "" {
 		t.Errorf("Message-ID has an empty random part, got %s", msgID)
+	}
+}
+
+func TestBuildEmailEncodesChineseHeaders(t *testing.T) {
+	account := &config.Account{Name: "张三", Email: "zhangsan@example.com"}
+	subject := strings.Repeat("会议通知：项目进度。", 6)
+	raw, err := BuildEmail(account, []string{"李四 <lisi@example.com>"}, nil, nil, subject, "你好，世界", "", nil, nil, "", nil, false, false, false, false)
+	if err != nil {
+		t.Fatalf("BuildEmail() error: %v", err)
+	}
+
+	headerEnd := bytes.Index(raw, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		t.Fatal("message has no header/body separator")
+	}
+	if !mailheader.IsASCII(string(raw[:headerEnd])) {
+		t.Fatalf("message headers contain raw non-ASCII bytes:\n%s", raw[:headerEnd])
+	}
+
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("ReadMessage() error: %v", err)
+	}
+
+	decodedSubject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatalf("DecodeHeader(Subject) error: %v", err)
+	}
+	if decodedSubject != subject {
+		t.Fatalf("decoded subject = %q, want %q", decodedSubject, subject)
+	}
+
+	from, err := msg.Header.AddressList("From")
+	if err != nil {
+		t.Fatalf("AddressList(From) error: %v", err)
+	}
+	if len(from) != 1 || from[0].Name != "张三" || from[0].Address != "zhangsan@example.com" {
+		t.Fatalf("unexpected From header: %+v", from)
+	}
+
+	to, err := msg.Header.AddressList("To")
+	if err != nil {
+		t.Fatalf("AddressList(To) error: %v", err)
+	}
+	if len(to) != 1 || to[0].Name != "李四" || to[0].Address != "lisi@example.com" {
+		t.Fatalf("unexpected To header: %+v", to)
+	}
+}
+
+func TestBuildEmailEncodesChineseAttachmentName(t *testing.T) {
+	account := &config.Account{Email: "zhangsan@example.com"}
+	raw, err := BuildEmail(account, []string{"lisi@example.com"}, nil, nil, "subject", "body", "",
+		nil, map[string][]byte{"报告.pdf": []byte("pdf")}, "", nil, false, false, false, false)
+	if err != nil {
+		t.Fatalf("BuildEmail() error: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("filename*=utf-8''")) {
+		t.Fatalf("attachment filename was not RFC 2231 encoded:\n%s", raw)
 	}
 }
 

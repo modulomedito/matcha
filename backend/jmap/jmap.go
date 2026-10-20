@@ -21,6 +21,7 @@ import (
 
 	"github.com/floatpane/matcha/backend"
 	"github.com/floatpane/matcha/config"
+	"github.com/floatpane/matcha/internal/mailheader"
 )
 
 const jmapMailboxIds = "mailboxIds"
@@ -565,12 +566,12 @@ func (p *Provider) SendEmail(_ context.Context, msg *backend.OutgoingEmail) erro
 
 	// Build raw RFC5322 message and upload as blob
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "From: %s\r\n", p.account.FormatFromHeader())
-	fmt.Fprintf(&buf, "To: %s\r\n", strings.Join(msg.To, ", "))
+	fmt.Fprintf(&buf, "From: %s\r\n", mailheader.FormatAddress(p.account.FormatFromHeader()))
+	fmt.Fprintf(&buf, "To: %s\r\n", mailheader.FormatAddressList(msg.To))
 	if len(msg.Cc) > 0 {
-		fmt.Fprintf(&buf, "Cc: %s\r\n", strings.Join(msg.Cc, ", "))
+		fmt.Fprintf(&buf, "Cc: %s\r\n", mailheader.FormatAddressList(msg.Cc))
 	}
-	fmt.Fprintf(&buf, "Subject: %s\r\n", msg.Subject)
+	fmt.Fprintf(&buf, "Subject: %s\r\n", mailheader.EncodeValue(msg.Subject))
 	fmt.Fprintf(&buf, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	if msg.InReplyTo != "" {
 		fmt.Fprintf(&buf, "In-Reply-To: %s\r\n", msg.InReplyTo)

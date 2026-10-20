@@ -27,6 +27,7 @@ import (
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-message"
+	_ "github.com/emersion/go-message/charset" // register common charsets (GB2312/GBK, Big5, …)
 	"github.com/emersion/go-message/mail"
 	"github.com/emersion/go-pgpmail"
 	"github.com/floatpane/matcha/config"
@@ -35,6 +36,7 @@ import (
 	"go.mozilla.org/pkcs7"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/ianaindex"
+	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
 )
@@ -263,7 +265,15 @@ func decodeReaderWithCharset(reader io.Reader, charset string) ([]byte, error) {
 
 // lookupCharsetEncoding resolves a charset name, falling back to UTF-8.
 func lookupCharsetEncoding(charset string) encoding.Encoding {
-	if enc, err := ianaindex.IANA.Encoding(charset); err == nil && enc != nil {
+	name := strings.ToLower(strings.Trim(strings.TrimSpace(charset), `"`))
+	switch name {
+	case "gb2312", "gb_2312-80", "gb2312-80", "euc-cn", "x-gbk", "cp936", "windows-936":
+		// GB2312 is a subset of GBK, and both share the same code points.
+		return simplifiedchinese.GBK
+	case "utf8":
+		return unicode.UTF8
+	}
+	if enc, err := ianaindex.IANA.Encoding(name); err == nil && enc != nil {
 		return enc
 	}
 	if enc, err := ianaindex.IANA.Encoding("utf-8"); err == nil && enc != nil {
@@ -291,14 +301,7 @@ func bestEffortCharset(contentType string) string {
 func decodeHeader(header string) string {
 	dec := new(mime.WordDecoder)
 	dec.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
-		enc, err := ianaindex.IANA.Encoding(charset)
-		if err != nil {
-			return nil, err
-		}
-		if enc == nil {
-			return nil, fmt.Errorf("fetcher: no encoding implementation for charset %q", charset)
-		}
-		return transform.NewReader(input, enc.NewDecoder()), nil
+		return transform.NewReader(input, lookupCharsetEncoding(charset).NewDecoder()), nil
 	}
 	decoded, err := dec.DecodeHeader(header)
 	if err != nil {
@@ -787,8 +790,8 @@ func FetchEmailBodyFromMailbox(account *config.Account, mailbox string, uid uint
 		senderEmail = msg.Envelope.From[0].Addr()
 	}
 
-	var plainPartID, plainPartEncoding string
-	var htmlPartID, htmlPartEncoding string
+	var plainPartID, plainPartEncoding, plainPartCharset string
+	var htmlPartID, htmlPartEncoding, htmlPartCharset string
 	var attachments []Attachment
 	var extractedBody string // Used if we intercept and decrypt a payload
 	// MIME type of extractedBody. Set alongside every assignment to extractedBody
@@ -806,11 +809,13 @@ func FetchEmailBodyFromMailbox(account *config.Account, mailbox string, uid uint
 				if htmlPartID == "" {
 					htmlPartID = partID
 					htmlPartEncoding = part.Encoding
+					htmlPartCharset = part.Params["charset"]
 				}
 			case "plain":
 				if plainPartID == "" {
 					plainPartID = partID
 					plainPartEncoding = part.Encoding
+					plainPartCharset = part.Params["charset"]
 				}
 			}
 		}
@@ -1255,13 +1260,16 @@ func FetchEmailBodyFromMailbox(account *config.Account, mailbox string, uid uint
 	var bodyMIMEType string
 	textPartID := ""
 	textPartEncoding := ""
+	textPartCharset := ""
 	if htmlPartID != "" {
 		textPartID = htmlPartID
 		textPartEncoding = htmlPartEncoding
+		textPartCharset = htmlPartCharset
 		bodyMIMEType = mimeTextHTML
 	} else if plainPartID != "" {
 		textPartID = plainPartID
 		textPartEncoding = plainPartEncoding
+		textPartCharset = plainPartCharset
 		bodyMIMEType = mimeTextPlain
 	}
 	if os.Getenv("DEBUG_KITTY_IMAGES") != "" {
@@ -1298,10 +1306,16 @@ func FetchEmailBodyFromMailbox(account *config.Account, mailbox string, uid uint
 		if len(msgs) > 0 {
 			if buf := msgs[0].FindBodySection(section); buf != nil {
 				// Use the encoding from BodyStructure to decode
-				if decoded, err := decodeAttachmentData(buf, textPartEncoding); err == nil {
-					body = string(decoded)
+				decoded, err := decodeAttachmentData(buf, textPartEncoding)
+				if err != nil {
+					decoded = buf
+				}
+				// Convert the part's declared charset (e.g. GB2312/GBK) to UTF-8
+				// so CJK text is not displayed as mojibake.
+				if utf8Body, decodeErr := decodeReaderWithCharset(bytes.NewReader(decoded), textPartCharset); decodeErr == nil {
+					body = string(utf8Body)
 				} else {
-					body = string(buf)
+					body = string(decoded)
 				}
 			}
 		}

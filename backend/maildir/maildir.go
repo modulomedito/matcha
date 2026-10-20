@@ -24,6 +24,7 @@ import (
 
 	emaildir "github.com/emersion/go-maildir"
 	"github.com/emersion/go-message"
+	_ "github.com/emersion/go-message/charset" // register common charsets (GB2312/GBK, Big5, …)
 	gomail "github.com/emersion/go-message/mail"
 
 	"github.com/floatpane/matcha/backend"

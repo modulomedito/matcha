@@ -27,6 +27,7 @@ import (
 	"github.com/floatpane/matcha/clib"
 	"github.com/floatpane/matcha/config"
 	"github.com/floatpane/matcha/internal/loglevel"
+	"github.com/floatpane/matcha/internal/mailheader"
 	"github.com/floatpane/matcha/pgp"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -255,16 +256,16 @@ func buildEmailMsg(account *config.Account, to, cc, bcc []string, subject, plain
 
 	// Set top-level headers (From/To/Subject/Date/etc)
 	headers := map[string]string{
-		"From":         fromHeader,
-		"To":           strings.Join(to, ", "),
-		"Subject":      subject,
+		"From":         mailheader.FormatAddress(fromHeader),
+		"To":           mailheader.FormatAddressList(to),
+		"Subject":      mailheader.EncodeValue(subject),
 		"Date":         time.Now().Format(time.RFC1123Z),
 		"Message-ID":   generateMessageID(account.GetSendAsEmail()),
 		"MIME-Version": "1.0",
 	}
 
 	if len(cc) > 0 {
-		headers["Cc"] = strings.Join(cc, ", ")
+		headers["Cc"] = mailheader.FormatAddressList(cc)
 	}
 
 	if inReplyTo != "" {
@@ -465,7 +466,7 @@ func buildEmailMsg(account *config.Account, to, cc, bcc []string, subject, plain
 			imgHeader.Set("Content-Type", mimeType)
 			imgHeader.Set("Content-Transfer-Encoding", "base64")
 			imgHeader.Set("Content-ID", "<"+cid+">")
-			imgHeader.Set("Content-Disposition", "inline; filename=\""+cid+"\"")
+			imgHeader.Set("Content-Disposition", mailheader.ContentDisposition("inline", cid))
 
 			imgPart, err := relatedWriter.CreatePart(imgHeader)
 			if err != nil {
@@ -488,7 +489,7 @@ func buildEmailMsg(account *config.Account, to, cc, bcc []string, subject, plain
 			partHeader := textproto.MIMEHeader{}
 			partHeader.Set("Content-Type", mimeType)
 			partHeader.Set("Content-Transfer-Encoding", "base64")
-			partHeader.Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+			partHeader.Set("Content-Disposition", mailheader.ContentDisposition("attachment", filename))
 
 			attachmentPart, err := innerWriter.CreatePart(partHeader)
 			if err != nil {
@@ -831,9 +832,9 @@ func SendCalendarReply(account *config.Account, to []string, subject, plainBody 
 	var msg bytes.Buffer
 
 	// Headers
-	fmt.Fprintf(&msg, "From: %s\r\n", fromHeader)
-	fmt.Fprintf(&msg, "To: %s\r\n", strings.Join(to, ", "))
-	fmt.Fprintf(&msg, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&msg, "From: %s\r\n", mailheader.FormatAddress(fromHeader))
+	fmt.Fprintf(&msg, "To: %s\r\n", mailheader.FormatAddressList(to))
+	fmt.Fprintf(&msg, "Subject: %s\r\n", mailheader.EncodeValue(subject))
 	fmt.Fprintf(&msg, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
 	fmt.Fprintf(&msg, "Message-ID: %s\r\n", generateMessageID(account.GetSendAsEmail()))
 	fmt.Fprintf(&msg, "MIME-Version: 1.0\r\n")
@@ -1022,6 +1023,64 @@ func SendCalendarReply(account *config.Account, to []string, subject, plainBody 
 	return rawMsg, nil
 }
 
+// splitHeadersAndBody separates transport headers (From, To, Subject, etc.)
+// from the MIME content headers and body. Folded header continuation lines are
+// unfolded so that encoded-words survive PGP signing and encryption.
+func splitHeadersAndBody(payload []byte) (messagetextproto.Header, []byte) {
+	var header messagetextproto.Header
+	idx := bytes.Index(payload, []byte("\r\n\r\n"))
+	if idx < 0 {
+		return header, payload
+	}
+
+	headerBytes := payload[:idx]
+	rawBody := payload[idx+4:]
+
+	var contentHeaders bytes.Buffer
+	var logicalLine bytes.Buffer
+
+	flush := func() {
+		if logicalLine.Len() == 0 {
+			return
+		}
+		line := logicalLine.Bytes()
+		logicalLine.Reset()
+		parts := bytes.SplitN(line, []byte(": "), 2)
+		if len(parts) != 2 {
+			return
+		}
+		key := string(parts[0])
+		val := string(parts[1])
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "CONTENT-") || upper == "MIME-VERSION" {
+			// Keep content headers with the body for the signed part
+			contentHeaders.Write(line)
+			contentHeaders.WriteString("\r\n")
+		} else {
+			// Transport headers go to the top-level message
+			header.Set(key, val)
+		}
+	}
+
+	for _, line := range bytes.Split(headerBytes, []byte("\r\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			// Continuation of a folded header: unfold it.
+			logicalLine.Write(line)
+			continue
+		}
+		flush()
+		logicalLine.Write(line)
+	}
+	flush()
+
+	contentHeaders.WriteString("\r\n")
+	contentHeaders.Write(rawBody)
+	return header, contentHeaders.Bytes()
+}
+
 // signEmailPGP signs the message payload with PGP and returns a multipart/signed message.
 // Supports both file-based keys and YubiKey hardware tokens.
 func signEmailPGP(payload []byte, account *config.Account) ([]byte, error) {
@@ -1068,41 +1127,7 @@ func signEmailPGP(payload []byte, account *config.Account) ([]byte, error) {
 	// pgpmail.Sign needs the transport headers in its header param so they
 	// appear at the top level of the output, not inside the signed part.
 	// Content headers (Content-Type, etc.) stay with the body as the signed part.
-	var header messagetextproto.Header
-	var bodyPayload []byte
-	if idx := bytes.Index(payload, []byte("\r\n\r\n")); idx >= 0 {
-		headerBytes := payload[:idx]
-		rawBody := payload[idx+4:]
-
-		var contentHeaders bytes.Buffer
-		for _, line := range bytes.Split(headerBytes, []byte("\r\n")) {
-			if len(line) == 0 {
-				continue
-			}
-			parts := bytes.SplitN(line, []byte(": "), 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key := string(parts[0])
-			val := string(parts[1])
-			upper := strings.ToUpper(key)
-			if strings.HasPrefix(upper, "CONTENT-") || upper == "MIME-VERSION" {
-				// Keep content headers with the body for the signed part
-				contentHeaders.Write(line)
-				contentHeaders.WriteString("\r\n")
-			} else {
-				// Transport headers go to the top-level message
-				header.Set(key, val)
-			}
-		}
-
-		// Reconstruct body payload: content headers + blank line + body
-		contentHeaders.WriteString("\r\n")
-		contentHeaders.Write(rawBody)
-		bodyPayload = contentHeaders.Bytes()
-	} else {
-		bodyPayload = payload
-	}
+	header, bodyPayload := splitHeadersAndBody(payload)
 
 	// Create multipart/signed message using go-pgpmail
 	var signed bytes.Buffer
@@ -1223,37 +1248,7 @@ func encryptEmailPGP(payload []byte, recipients []string, account *config.Accoun
 	// pgpmail.Encrypt needs transport headers in its header param so they
 	// appear unencrypted in the outer message; only content headers + body
 	// are encrypted.
-	var header messagetextproto.Header
-	var bodyPayload []byte
-	if idx := bytes.Index(payload, []byte("\r\n\r\n")); idx >= 0 {
-		headerBytes := payload[:idx]
-		rawBody := payload[idx+4:]
-
-		var contentHeaders bytes.Buffer
-		for _, line := range bytes.Split(headerBytes, []byte("\r\n")) {
-			if len(line) == 0 {
-				continue
-			}
-			parts := bytes.SplitN(line, []byte(": "), 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key := string(parts[0])
-			val := string(parts[1])
-			upper := strings.ToUpper(key)
-			if strings.HasPrefix(upper, "CONTENT-") || upper == "MIME-VERSION" {
-				contentHeaders.Write(line)
-				contentHeaders.WriteString("\r\n")
-			} else {
-				header.Set(key, val)
-			}
-		}
-		contentHeaders.WriteString("\r\n")
-		contentHeaders.Write(rawBody)
-		bodyPayload = contentHeaders.Bytes()
-	} else {
-		bodyPayload = payload
-	}
+	header, bodyPayload := splitHeadersAndBody(payload)
 
 	var encrypted bytes.Buffer
 	mw, err := pgpmail.Encrypt(&encrypted, header, entityList, nil, nil)

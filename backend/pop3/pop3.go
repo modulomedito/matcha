@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-message"
+	_ "github.com/emersion/go-message/charset" // register common charsets (GB2312/GBK, Big5, …)
 	gomail "github.com/emersion/go-message/mail"
 	pop3client "github.com/knadh/go-pop3"
 

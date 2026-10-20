@@ -2,10 +2,12 @@ package fetcher
 
 import (
 	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/floatpane/matcha/config"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 type testPartHeader map[string]string
@@ -72,6 +74,39 @@ func TestLookupCharsetEncodingAlwaysReturnsNonNil(t *testing.T) {
 				t.Fatalf("lookupCharsetEncoding(%q) returned nil", name)
 			}
 		})
+	}
+}
+
+func TestDecodeReaderWithCharsetGB2312(t *testing.T) {
+	const want = "中文邮件内容"
+	encoded, err := simplifiedchinese.GBK.NewEncoder().String(want)
+	if err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+
+	for _, charset := range []string{"gb2312", "GB2312", "euc-cn", "gbk"} {
+		t.Run(charset, func(t *testing.T) {
+			got, err := decodeReaderWithCharset(strings.NewReader(encoded), charset)
+			if err != nil {
+				t.Fatalf("decodeReaderWithCharset() error: %v", err)
+			}
+			if string(got) != want {
+				t.Fatalf("decodeReaderWithCharset() = %q, want %q", string(got), want)
+			}
+		})
+	}
+}
+
+func TestDecodeHeaderGB2312(t *testing.T) {
+	const want = "中文主题"
+	encoded, err := simplifiedchinese.GBK.NewEncoder().String(want)
+	if err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	header := "=?gb2312?B?" + base64.StdEncoding.EncodeToString([]byte(encoded)) + "?="
+
+	if got := decodeHeader(header); got != want {
+		t.Fatalf("decodeHeader() = %q, want %q", got, want)
 	}
 }
 
