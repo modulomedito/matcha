@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/floatpane/matcha/fetcher"
 )
 
@@ -160,4 +162,84 @@ func TestEmailViewUpdate(t *testing.T) {
 			t.Errorf("Expected reply to have subject '%s', but got '%s'", emailWithAttachments.Subject, replyMsg.Email.Subject)
 		}
 	})
+}
+
+func TestFormatEmailHeaderAlignsFields(t *testing.T) {
+	email := fetcher.Email{
+		To:      []string{"alice@example.com", "bob@example.com"},
+		From:    "sender@example.com",
+		Subject: "Hello",
+	}
+
+	got := formatEmailHeader(email, 80, "")
+	want := "To:      alice@example.com, bob@example.com\n" +
+		"From:    sender@example.com\n" +
+		"Subject: Hello"
+	if got != want {
+		t.Fatalf("formatEmailHeader() =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestFormatEmailHeaderWrapsLongToWithAlignedContinuation(t *testing.T) {
+	email := fetcher.Email{
+		To: []string{
+			"alpha@example.com", "bravo@example.com", "charlie@example.com",
+			"delta@example.com", "echo@example.com", "foxtrot@example.com",
+		},
+		From:    "sender@example.com",
+		Subject: "A long recipient list",
+	}
+	const width = 40
+
+	got := formatEmailHeader(email, width, "")
+	lines := strings.Split(got, "\n")
+	if len(lines) <= 3 {
+		t.Fatalf("expected the To field to wrap, got %d lines:\n%s", len(lines), got)
+	}
+
+	indent := strings.Repeat(" ", emailHeaderLabelWidth)
+	sawContinuation := false
+	for _, line := range lines {
+		if lipgloss.Width(line) > width {
+			t.Fatalf("header line exceeds width %d: %q", width, line)
+		}
+		if strings.HasPrefix(line, indent) {
+			sawContinuation = true
+		}
+	}
+	if !sawContinuation {
+		t.Fatalf("expected wrapped continuation lines aligned to the value column:\n%s", got)
+	}
+}
+
+func TestFormatEmailHeaderWrapsChineseSubject(t *testing.T) {
+	email := fetcher.Email{
+		To:      []string{"alice@example.com"},
+		From:    "sender@example.com",
+		Subject: strings.Repeat("中文主题", 20),
+	}
+	const width = 30
+
+	got := formatEmailHeader(email, width, "")
+	for _, line := range strings.Split(got, "\n") {
+		if lipgloss.Width(line) > width {
+			t.Fatalf("header line exceeds width %d: %q", width, line)
+		}
+	}
+}
+
+func TestRenderHeaderFitsViewportWidth(t *testing.T) {
+	email := fetcher.Email{
+		To:      []string{"alpha@example.com", "bravo@example.com", "charlie@example.com"},
+		From:    "sender@example.com",
+		Subject: strings.Repeat("中文主题", 10),
+	}
+	const width = 40
+
+	header := NewEmailView(email, 0, width, 20, MailboxInbox, false).renderHeader()
+	for _, line := range strings.Split(header, "\n") {
+		if lipgloss.Width(line) > width {
+			t.Fatalf("rendered header line exceeds viewport width %d: %q", width, line)
+		}
+	}
 }

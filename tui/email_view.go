@@ -157,7 +157,7 @@ func NewEmailView(email fetcher.Email, emailIndex, width, height int, mailbox Ma
 	}
 
 	// Create header and compute heights that reduce viewport space.
-	header := fmt.Sprintf("From: %s\nSubject: %s", email.From, email.Subject)
+	header := formatEmailHeader(email, emailHeaderContentWidth(width), cryptoStatusBadges(isEncrypted, isSMIME, smimeTrusted, isPGP, pgpTrusted, isPGPEncrypted, isPatch))
 	headerHeight := lipgloss.Height(header) + 2
 
 	attachmentHeight := 0
@@ -443,7 +443,7 @@ func (m *EmailView) regenerateBody() {
 // handleWindowSize updates the viewport and re-renders the body when the
 // terminal is resized.
 func (m *EmailView) handleWindowSize(msg tea.WindowSizeMsg) {
-	header := fmt.Sprintf("To: %s\nFrom: %s\nSubject: %s ", strings.Join(m.email.To, ", "), m.email.From, m.email.Subject)
+	header := formatEmailHeader(m.email, emailHeaderContentWidth(msg.Width), cryptoStatusBadges(m.isEncrypted, m.isSMIME, m.smimeTrusted, m.isPGP, m.pgpTrusted, m.isPGPEncrypted, m.isPatch))
 	headerHeight := lipgloss.Height(header) + 2
 	attachmentHeight := 0
 	if len(m.email.Attachments) > 0 {
@@ -500,32 +500,91 @@ func (m *EmailView) View() tea.View {
 
 // renderHeader renders the email header bar, including crypto and patch badges.
 func (m *EmailView) renderHeader() string {
+	header := formatEmailHeader(m.email, emailHeaderContentWidth(m.viewport.Width()), cryptoStatusBadges(m.isEncrypted, m.isSMIME, m.smimeTrusted, m.isPGP, m.pgpTrusted, m.isPGPEncrypted, m.isPatch))
+	return emailHeaderStyle.Width(m.viewport.Width()).Render(header)
+}
+
+// emailHeaderContentWidth returns the usable width inside the header's
+// horizontal padding.
+func emailHeaderContentWidth(width int) int {
+	const horizontalPadding = 2
+	if width <= horizontalPadding {
+		return 1
+	}
+	return width - horizontalPadding
+}
+
+const emailHeaderLabelWidth = len("Subject: ")
+
+// formatEmailHeader renders the To/From/Subject fields one per line, aligned to
+// a common value column. Long values wrap with continuation lines aligned to
+// the same column.
+func formatEmailHeader(email fetcher.Email, width int, extra string) string {
+	rows := []struct {
+		label string
+		value string
+	}{
+		{label: "To", value: strings.Join(email.To, ", ")},
+		{label: "From", value: email.From},
+		{label: "Subject", value: email.Subject + extra},
+	}
+
+	valueWidth := width - emailHeaderLabelWidth
+	if valueWidth < 1 {
+		valueWidth = 1
+	}
+	indent := strings.Repeat(" ", emailHeaderLabelWidth)
+
+	var b strings.Builder
+	for i, row := range rows {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		label := fmt.Sprintf("%-*s", emailHeaderLabelWidth, row.label+":")
+		value := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(row.value, "\r\n", " "), "\n", " "))
+		lines := strings.Split(lipgloss.Wrap(value, valueWidth, ""), "\n")
+		if value == "" {
+			lines = []string{""}
+		}
+		for j, line := range lines {
+			if j > 0 {
+				b.WriteByte('\n')
+				b.WriteString(indent)
+			} else {
+				b.WriteString(label)
+			}
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
+func cryptoStatusBadges(isEncrypted, isSMIME, smimeTrusted, isPGP, pgpTrusted, isPGPEncrypted, isPatch bool) string {
 	var cryptoStatus strings.Builder
 
-	if m.isEncrypted {
+	if isEncrypted {
 		cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Accent).Render(" [S/MIME: 🔒 Encrypted]"))
-	} else if m.isSMIME {
-		if m.smimeTrusted {
+	} else if isSMIME {
+		if smimeTrusted {
 			cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Accent).Render(" [S/MIME: ✅ Trusted]"))
 		} else {
 			cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Danger).Render(" [S/MIME: ❌ Untrusted]"))
 		}
 	}
-	if m.isPGPEncrypted {
+	if isPGPEncrypted {
 		cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Accent).Render(" [PGP: 🔒 Encrypted]"))
-	} else if m.isPGP {
-		if m.pgpTrusted {
+	} else if isPGP {
+		if pgpTrusted {
 			cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Accent).Render(" [PGP: ✅ Verified]"))
 		} else {
 			cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Danger).Render(" [PGP: ⚠️ Unverified]"))
 		}
 	}
-	if m.isPatch {
+	if isPatch {
 		cryptoStatus.WriteString(lipgloss.NewStyle().Foreground(theme.ActiveTheme.Accent).Render(" [📮 Patch]"))
 	}
 
-	header := fmt.Sprintf("To: %s | From: %s | Subject: %s%s", strings.Join(m.email.To, ", "), m.email.From, m.email.Subject, cryptoStatus.String())
-	return emailHeaderStyle.Width(m.viewport.Width()).Render(header)
+	return cryptoStatus.String()
 }
 
 // renderHelp renders the bottom help bar based on current focus and state.
